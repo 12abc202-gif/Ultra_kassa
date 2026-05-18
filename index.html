@@ -709,7 +709,8 @@ function startClock() {
 function todayStr(){ return new Date().toISOString().slice(0,10); }
 
 // ========== PAGES ==========
-function switchPage(idx) {
+async function switchPage(idx) {
+  for(let i=0;i<2;i++){ if(scannerState[i]) await stopScanner(i); }
   currentPage = idx;
   document.querySelectorAll('.page').forEach((p,i)=>p.classList.toggle('active',i===idx));
   document.querySelectorAll('.nav-btn').forEach((b,i)=>b.classList.toggle('active',i===idx));
