@@ -186,7 +186,7 @@ html,body{height:100%;overflow:hidden;font-family:var(--font);font-size:14px;bac
 
   <!-- HEADER -->
   <div id="appHeader">
-    <img src="logo.png" alt="Логотип" style="height:36px;width:auto;object-fit:contain;margin-right:4px">
+    <img src="logo.png" alt="Лого" style="height:36px;width:auto;object-fit:contain">
     <span class="hdr-title">Ultra Касса v3.5</span>
     <div class="hdr-right">
       <span class="hdr-cashier" id="lbl_cashier">Кассир: —</span>
@@ -764,7 +764,7 @@ async function startScanner(idx) {
 
     await scanner.start(
       cam.id,
-      { fps: 10, qrbox: { width: 220, height: 70 }, aspectRatio: 2.8 },
+      { fps: 15, qrbox: { width: 280, height: 120 }, aspectRatio: 1.7 },
       (code) => onScanSuccess(idx, code),
       () => {}
     );
