@@ -361,12 +361,9 @@ if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const db = firebase.firestore();
 
-// ========== ОБЩИЕ КОЛЛЕКЦИИ (совпадают с Python-приложением) ==========
-// Структура: shared_data/products/items/{code}
-//            shared_data/sales/records/{number}
-const userKey = () => currentUser.email.replace(/@/g, '_at_').replace(/\./g, '_');
-const PRODUCTS_COL = () => db.collection('users').doc(userKey()).collection('products');
-const SALES_COL    = () => db.collection('users').doc(userKey()).collection('sales');
+// ========== КОЛЛЕКЦИИ ==========
+const PRODUCTS_COL = () => db.collection('users').doc(currentUser?.email?.replace(/@/g, '_at_').replace(/\./g, '_')).collection('products');
+const SALES_COL = () => db.collection('users').doc(currentUser?.email?.replace(/@/g, '_at_').replace(/\./g, '_')).collection('sales');
 
 // ========== STATE ==========
 let currentUser = null;
@@ -397,18 +394,16 @@ async function doLogin() {
   const msgDiv = document.getElementById('loginMsg');
   if (!email || !password) { msgDiv.textContent = '❌ Введите email и пароль!'; return; }
   msgDiv.textContent = '⏳ Вход...';
-  msgDiv.style.color = '#666';
   try {
     await auth.signInWithEmailAndPassword(email, password);
-    // onAuthStateChanged подхватит и вызовет afterLogin
   } catch (error) {
     let msg = '❌ ';
-    if (error.code === 'auth/user-not-found') msg += 'Пользователь не найден';
-    else if (error.code === 'auth/wrong-password' || error.code === 'auth/invalid-credential') msg += 'Неверный пароль';
+    if (error.code === 'auth/user-not-found') msg += 'Пользователь не найден. Зарегистрируйтесь сначала.';
+    else if (error.code === 'auth/wrong-password') msg += 'Неверный пароль';
+    else if (error.code === 'auth/invalid-credential') msg += 'Неверный email или пароль';
     else if (error.code === 'auth/invalid-email') msg += 'Неверный формат email';
     else msg += error.message;
     msgDiv.textContent = msg;
-    msgDiv.style.color = 'red';
   }
 }
 
@@ -426,17 +421,17 @@ async function loadData() {
     });
 
     // Загрузка продаж
-    const salesSnap = await SALES_COL().orderBy('number').get();
+    const salesSnap = await SALES_COL().orderBy('timestamp', 'desc').get();
     sales = [];
     salesSnap.forEach(doc => {
       const s = doc.data();
-      // Нормализуем items: Python пишет массив объектов, нам нужен массив массивов
+      // Нормализуем items
       if (s.items && s.items.length && typeof s.items[0] === 'object' && !Array.isArray(s.items[0])) {
         s.items = s.items.map(it => [it.name||'', it.qty||0, it.price||0, it.total||0, it.discount||0, it.purchase_price||0, it.unit||'шт', it.is_weighted||false]);
       }
       sales.push(s);
     });
-    sales.sort((a,b) => (a.number||0)-(b.number||0));
+    sales.sort((a,b) => (b.number||0) - (a.number||0));
 
     setSyncStatus('✅ Синхр.');
     setStatus(`✅ Товаров: ${Object.keys(products).length}, Продаж: ${sales.length}`);
@@ -447,13 +442,13 @@ async function loadData() {
   }
 }
 
-// Подписка на изменения в реальном времени
+// Подписка на изменения
 function subscribeRealtime() {
-  // Отписываемся от старых
   realtimeListeners.forEach(u => u());
   realtimeListeners = [];
 
-  // Товары — слушаем изменения от Python в реальном времени
+  if (!currentUser) return;
+
   const unsubProd = PRODUCTS_COL().onSnapshot(snap => {
     snap.docChanges().forEach(change => {
       const d = change.doc.data();
@@ -470,8 +465,7 @@ function subscribeRealtime() {
     setSyncStatus('✅ Синхр.');
   }, err => { console.error('products listener:', err); setSyncStatus('❌ Ошибка'); });
 
-  // Продажи — слушаем новые записи
-  const unsubSales = SALES_COL().orderBy('number').onSnapshot(snap => {
+  const unsubSales = SALES_COL().orderBy('timestamp', 'desc').onSnapshot(snap => {
     sales = [];
     snap.forEach(doc => {
       const s = doc.data();
@@ -480,7 +474,7 @@ function subscribeRealtime() {
       }
       sales.push(s);
     });
-    sales.sort((a,b)=>(a.number||0)-(b.number||0));
+    sales.sort((a,b) => (b.number||0) - (a.number||0));
     renderHistory();
     renderReports();
     updateCashierDropdowns();
@@ -495,11 +489,12 @@ async function saveProduct(code) {
   if (!products[code]) return;
   try {
     await PRODUCTS_COL().doc(code).set(products[code]);
-    setSyncStatus('✅ Синхр.');
+    setSyncStatus('✅ Сохранено');
     return true;
   } catch(e) {
     setSyncStatus('❌ Ошибка');
     console.error('saveProduct:', e);
+    alert('Ошибка сохранения: ' + e.message);
     return false;
   }
 }
@@ -508,46 +503,86 @@ async function deleteProductFirebase(code) {
   try {
     await PRODUCTS_COL().doc(code).delete();
     return true;
-  } catch(e) { console.error('deleteProduct:', e); return false; }
+  } catch(e) { 
+    console.error('deleteProduct:', e);
+    alert('Ошибка удаления: ' + e.message);
+    return false; 
+  }
 }
 
 // ========== SAVE SALE ==========
 async function saveSale(sale) {
   try {
-    // Сохраняем items как массив объектов (читаемо и Python-ом и сайтом)
     const saleToSave = {
       ...sale,
       items: sale.items.map(item => ({
-        name:           item[0],
-        qty:            item[1],
-        price:          item[2],
-        total:          item[3],
-        discount:       item[4] || 0,
+        name: item[0],
+        qty: item[1],
+        price: item[2],
+        total: item[3],
+        discount: item[4] || 0,
         purchase_price: item[5] || 0,
-        unit:           item[6] || 'шт',
-        is_weighted:    item[7] || false,
+        unit: item[6] || 'шт',
+        is_weighted: item[7] || false,
       }))
     };
     await SALES_COL().doc(String(sale.number)).set(saleToSave);
-    setSyncStatus('✅ Синхр.');
+    setSyncStatus('✅ Сохранено');
     return true;
   } catch(e) {
     setSyncStatus('❌ Ошибка');
     console.error('saveSale:', e);
+    alert('Ошибка сохранения продажи: ' + e.message);
     return false;
   }
 }
 
-// ========== SYNC STATUS ==========
-function setSyncStatus(txt) {
-  const el = document.getElementById('syncIndicator');
-  if (el) el.textContent = txt;
+// ========== DELETE ALL DATA ==========
+async function deleteAllSales() {
+  if (!confirm('⚠️ ВНИМАНИЕ! Это действие НЕОБРАТИМО.\nУдалить ВСЮ историю продаж?')) return;
+  
+  setSyncStatus('☁️ Удаление продаж...');
+  const batch = db.batch();
+  const snapshot = await SALES_COL().get();
+  
+  snapshot.forEach(doc => {
+    batch.delete(doc.ref);
+  });
+  
+  await batch.commit();
+  sales = [];
+  setSyncStatus('✅ Продажи удалены');
+  setStatus('История продаж полностью очищена');
+  renderHistory();
+  renderReports();
+}
+
+async function deleteAllProducts() {
+  if (!confirm('⚠️ ВНИМАНИЕ! Это действие НЕОБРАТИМО.\nУдалить ВСЕ товары?')) return;
+  
+  setSyncStatus('☁️ Удаление товаров...');
+  const batch = db.batch();
+  const snapshot = await PRODUCTS_COL().get();
+  
+  snapshot.forEach(doc => {
+    batch.delete(doc.ref);
+  });
+  
+  await batch.commit();
+  products = {};
+  cart = [];
+  renderCart();
+  setSyncStatus('✅ Товары удалены');
+  setStatus('Все товары удалены из базы');
+  renderProductList();
+  renderStock();
+  renderQuickButtons();
 }
 
 // ========== AFTER LOGIN ==========
 async function afterLogin(user) {
   currentUser = user;
-  currentCashier = user.email.split('@')[0];
+  currentCashier = user.email?.split('@')[0] || 'Кассир';
   await loadData();
   subscribeRealtime();
   document.getElementById('loginOverlay').style.display = 'none';
@@ -577,6 +612,12 @@ function doLogout() {
   document.getElementById('loginOverlay').style.display = 'flex';
   document.getElementById('loginEmail').value = '';
   document.getElementById('loginPass').value = '';
+}
+
+// ========== SYNC STATUS ==========
+function setSyncStatus(txt) {
+  const el = document.getElementById('syncIndicator');
+  if (el) el.textContent = txt;
 }
 
 // ========== CLOCK ==========
@@ -609,7 +650,7 @@ document.querySelectorAll('.modal-overlay').forEach(m => {
   m.addEventListener('click', e => { if(e.target===m) m.classList.remove('show'); });
 });
 
-// ========== SCANNER ==========
+// ========== SCANNER (оставляем без изменений) ==========
 async function toggleScanner(idx) {
   if (activeScannerIdx===idx) await stopScanner(idx);
   else { if(activeScannerIdx>=0) await stopScanner(activeScannerIdx); await startScanner(idx); }
@@ -657,11 +698,11 @@ function autoFill() {
     document.getElementById('f_price').value=p.price;
     document.getElementById('f_purchase').value=p.purchase_price||0;
     document.getElementById('f_qty').value=0;
-    document.getElementById('f_minstock').value=p.min_stock;
-    document.getElementById('f_weighted').checked=p.is_weighted;
-    document.getElementById('f_unit').value=p.unit;
-    document.getElementById('formTitle').textContent='✏️ Редактирование: '+p.name;
-    setStatus(`✅ ${p.name} | Остаток: ${p.quantity} ${p.unit}`);
+    document.getElementById('f_minstock').value=p.min_stock||5;
+    document.getElementById('f_weighted').checked=p.is_weighted||false;
+    document.getElementById('f_unit').value=p.unit||'шт';
+    document.getElementById('formTitle').innerHTML='✏️ Редактирование: '+esc(p.name);
+    setStatus(`✅ ${p.name} | Остаток: ${fmtQty(p.quantity||0,p.is_weighted)} ${p.unit||'шт'}`);
   } else {
     setStatus(`❌ Штрихкод "${code}" не найден. Заполните для добавления.`);
     document.getElementById('f_name').value='';
@@ -669,7 +710,7 @@ function autoFill() {
     document.getElementById('f_purchase').value='0';
     document.getElementById('f_qty').value='0';
     document.getElementById('f_minstock').value='5';
-    document.getElementById('formTitle').textContent='+ Новый товар';
+    document.getElementById('formTitle').innerHTML='+ Новый товар';
   }
 }
 function updateUnit(){document.getElementById('f_unit').value=document.getElementById('f_weighted').checked?'кг':'шт';}
@@ -684,21 +725,30 @@ async function addProduct() {
   const weighted=document.getElementById('f_weighted').checked;
   const unit=document.getElementById('f_unit').value.trim()||(weighted?'кг':'шт');
   if(!code||!name||price<=0){alert('Заполните штрихкод, название и цену!');return;}
-  if(products[code]&&!confirm(`Товар "${products[code].name}" уже есть. Обновить?`)) return;
-  if(products[code]){
-    const old=products[code];
-    products[code]={...old,name,price,purchase_price:purchase,is_weighted:weighted,unit,quantity:old.quantity+qty,min_stock:minstock};
-  } else {
-    products[code]={code,name,price,purchase_price:purchase,is_weighted:weighted,unit,quantity:qty,min_stock:minstock,sales_count:0};
-  }
+  if(products[code] && !confirm(`Товар "${products[code].name}" уже есть. Обновить?`)) return;
+  
+  const currentQty = products[code] ? (products[code].quantity || 0) + qty : qty;
+  
+  products[code] = {
+    code, name, price, 
+    purchase_price: purchase,
+    is_weighted: weighted,
+    unit,
+    quantity: currentQty,
+    min_stock: minstock,
+    sales_count: products[code]?.sales_count || 0
+  };
+  
   setSyncStatus('☁️ Сохранение...');
-  await saveProduct(code);
-  setStatus(`✅ ${products[code].quantity>0?'Обновлён':'Добавлен'}: ${name}`);
+  if (await saveProduct(code)) {
+    setStatus(`✅ ${products[code].quantity>0?'Обновлён':'Добавлен'}: ${name}`);
+  }
   clearForm();
   renderProductList();
   renderStock();
   renderQuickButtons();
 }
+
 function updateProduct(){const code=document.getElementById('f_code').value.trim();if(!code||!products[code]){alert('Выберите товар!');return;}addProduct();}
 
 async function deleteProduct() {
@@ -724,7 +774,7 @@ function clearForm(){
   document.getElementById('f_minstock').value='5';
   document.getElementById('f_weighted').checked=false;
   document.getElementById('f_unit').value='шт';
-  document.getElementById('formTitle').textContent='+ Добавить товар';
+  document.getElementById('formTitle').innerHTML='+ Добавить товар';
   selectedProductCode=null;
 }
 
@@ -735,7 +785,7 @@ function renderProductList(){
   Object.values(products).filter(p=>!q||p.name.toLowerCase().includes(q)||(p.code+'').includes(q)).forEach(p=>{
     const tr=document.createElement('tr');
     if(p.code===selectedProductCode) tr.classList.add('selected');
-    tr.innerHTML=`<td>${esc(p.code)}</td><td>${esc(p.name)}</td><td class="col-num">${num(p.price)}</td><td class="col-num">${fmtQty(p.quantity,p.is_weighted)}</td><td>${esc(p.unit)}</td>`;
+    tr.innerHTML=`<td>${esc(p.code)}</td><td>${esc(p.name)}</td><td class="col-num">${num(p.price)}</td><td class="col-num">${fmtQty(p.quantity||0,p.is_weighted)}</td><td>${esc(p.unit||'шт')}</td>`;
     tr.style.cursor='pointer';
     tr.onclick=()=>{
       document.querySelectorAll('#productTbody tr').forEach(r=>r.classList.remove('selected'));
@@ -751,10 +801,10 @@ function addByBarcode(){const code=document.getElementById('barcodeInput').value
 function addProductByCode(code){
   const p=products[code];
   if(!p){alert(`❌ Штрихкод "${code}" не найден!`);return;}
-  if(p.quantity<=0){alert(`❌ "${p.name}" нет на складе!`);return;}
+  if((p.quantity||0)<=0){alert(`❌ "${p.name}" нет на складе!`);return;}
   const cartItem=cart.find(c=>c.code===code);
   const inCart=cartItem?cartItem.qty:0;
-  const available=p.quantity-inCart;
+  const available=(p.quantity||0)-inCart;
   if(available<=0){alert(`❌ Весь запас "${p.name}" уже в корзине!`);return;}
   if(p.is_weighted){
     openQtyDialog(`⚖️ ${p.name}`,`Цена: ${num(p.price)} Сом/кг\nДоступно: ${fmtQty(available,true)} кг`,available,true,qty=>addToCart(p,qty));
@@ -782,7 +832,7 @@ function addToCart(p,qty){
   const idx=cart.findIndex(c=>c.code===p.code);
   if(idx!==-1){
     cart[idx].qty+=qty; cart[idx].total=cart[idx].qty*p.price;
-    setStatus(`✅ ${p.name} x${cart[idx].qty} ${p.unit}`);
+    setStatus(`✅ ${p.name} x${fmtQty(cart[idx].qty,p.is_weighted)} ${p.unit}`);
   } else {
     cart.push({code:p.code,name:p.name,qty,price:p.price,total:qty*p.price,unit:p.unit,is_weighted:p.is_weighted,purchase_price:p.purchase_price||0});
     setStatus(`✅ Добавлен: ${p.name}`);
@@ -810,7 +860,7 @@ function updateDiscount(){discountRate=parseFloat(document.getElementById('disco
 function removeCartItem(i){const removed=cart.splice(i,1)[0];if(selectedCartIdx>=i)selectedCartIdx=-1;renderCart();setStatus(`🗑️ Удалён: ${removed.name}`);}
 
 // ========== QUICK BUTTONS ==========
-function getTopProducts(n=6){return Object.values(products).filter(p=>p.quantity>0).sort((a,b)=>(b.sales_count||0)-(a.sales_count||0)).slice(0,n);}
+function getTopProducts(n=6){return Object.values(products).filter(p=>(p.quantity||0)>0).sort((a,b)=>(b.sales_count||0)-(a.sales_count||0)).slice(0,n);}
 function renderQuickButtons(){
   const grid=document.getElementById('quickGrid');
   grid.innerHTML='';
@@ -819,7 +869,7 @@ function renderQuickButtons(){
   top.forEach(p=>{
     const btn=document.createElement('div');
     btn.className='quick-btn';
-    btn.innerHTML=`<div class="quick-name">${esc(p.name)}</div><div class="quick-price">${num(p.price)} Сом</div><div class="quick-stock">${fmtQty(p.quantity,p.is_weighted)} ${esc(p.unit)}</div>`;
+    btn.innerHTML=`<div class="quick-name">${esc(p.name)}</div><div class="quick-price">${num(p.price)} Сом</div><div class="quick-stock">${fmtQty(p.quantity||0,p.is_weighted)} ${esc(p.unit||'шт')}</div>`;
     btn.onclick=()=>addProductByCode(p.code);
     grid.appendChild(btn);
   });
@@ -827,13 +877,13 @@ function renderQuickButtons(){
 
 // ========== WEIGHTED ==========
 function openWeightedDialog(){
-  const weighted=Object.values(products).filter(p=>p.is_weighted&&p.quantity>0);
+  const weighted=Object.values(products).filter(p=>p.is_weighted&&(p.quantity||0)>0);
   if(!weighted.length){alert('Нет весовых товаров в наличии');return;}
   const tbody=document.getElementById('weightedTbody');
   tbody.innerHTML='';
   weighted.forEach(p=>{
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${esc(p.name)}</td><td class="col-num">${num(p.price)}</td><td class="col-num">${fmtQty(p.quantity,true)} кг</td>`;
+    tr.innerHTML=`<td>${esc(p.name)}</td><td class="col-num">${num(p.price)}</td><td class="col-num">${fmtQty(p.quantity||0,true)} кг</td>`;
     tr.style.cursor='pointer';
     tr.onclick=()=>{closeModal('modalWeighted');addProductByCode(p.code);};
     tbody.appendChild(tr);
@@ -844,7 +894,7 @@ function openWeightedDialog(){
 // ========== SALE ==========
 function completeSale(){
   if(!cart.length){alert('Корзина пуста!');return;}
-  for(const item of cart){if(!products[item.code]||item.qty>products[item.code].quantity){alert(`Недостаточно "${item.name}" на складе!`);return;}}
+  for(const item of cart){if(!products[item.code]||item.qty>(products[item.code].quantity||0)){alert(`Недостаточно "${item.name}" на складе!`);return;}}
   payTotal=cartTotal();
   document.getElementById('payTotal').textContent=num(payTotal);
   document.getElementById('cashInput').value='';
@@ -868,40 +918,43 @@ function confirmPayment(){
 
 async function finalizeSale(cash,change){
   // Обновляем остатки
-  cart.forEach(item=>{
+  for(const item of cart){
     if(products[item.code]){
-      products[item.code].quantity-=item.qty;
-      products[item.code].sales_count=(products[item.code].sales_count||0)+item.qty;
+      products[item.code].quantity -= item.qty;
+      products[item.code].sales_count = (products[item.code].sales_count||0) + item.qty;
+      await saveProduct(item.code); // Сохраняем каждый изменённый товар
     }
-  });
-  const saleNumber=sales.length+1;
-  const now=new Date();
-  const sale={
-    number:saleNumber,
-    date:now.toLocaleString('ru-RU'),
-    timestamp:now.toISOString(),
-    items:cart.map(c=>[c.name,c.qty,c.price,c.total,discountRate,c.purchase_price||0,c.unit,c.is_weighted]),
-    total:payTotal,cash,change,discount:discountRate,cashier:currentCashier
-  };
-  sales.push(sale);
-
-  const receipt=buildReceipt(sale,cash,change);
-  lastReceiptText=receipt;
-  document.getElementById('receiptText').textContent=receipt;
-  openModal('modalReceipt');
-
-  cart=[];selectedCartIdx=-1;discountRate=0;document.getElementById('discountInput').value=0;
-  renderCart();renderQuickButtons();updateCashierDropdowns();
-
-  setSyncStatus('☁️ Сохранение...');
-
-  // Сохраняем остатки товаров
-  for(const item of sale.items){
-    const code=Object.keys(products).find(c=>products[c].name===item[0]);
-    if(code) await saveProduct(code);
   }
-  // Сохраняем продажу
+  
+  const saleNumber = sales.length > 0 ? Math.max(...sales.map(s=>s.number||0)) + 1 : 1;
+  const now = new Date();
+  const sale = {
+    number: saleNumber,
+    date: now.toLocaleString('ru-RU'),
+    timestamp: now.toISOString(),
+    items: cart.map(c=>[c.name,c.qty,c.price,c.total,discountRate,c.purchase_price||0,c.unit,c.is_weighted]),
+    total: payTotal,
+    cash,
+    change,
+    discount: discountRate,
+    cashier: currentCashier
+  };
+
+  const receipt = buildReceipt(sale,cash,change);
+  lastReceiptText = receipt;
+  document.getElementById('receiptText').textContent = receipt;
+  
   await saveSale(sale);
+  
+  cart = [];
+  selectedCartIdx = -1;
+  discountRate = 0;
+  document.getElementById('discountInput').value = 0;
+  renderCart();
+  renderQuickButtons();
+  updateCashierDropdowns();
+  
+  openModal('modalReceipt');
   setStatus(`✅ Продажа №${sale.number} | ${num(payTotal)} Сом`);
 }
 
@@ -910,7 +963,7 @@ function buildReceipt(sale,cash,change){
   let r=`\n${sep}\nМАГАЗИН\n${sep}\nЧЕК №${sale.number}\nДата: ${sale.date}\nКассир: ${sale.cashier}\n${dash}\n`;
   sale.items.forEach(item=>{
     const[name,qty,price,total,disc,,unit,isW]=item;
-    const qStr=isW?`${qty.toFixed(2)}кг`:`${qty}шт`;
+    const qStr=isW?`${parseFloat(qty).toFixed(2)}кг`:`${parseInt(qty)}шт`;
     const t=total*(1-disc/100);
     r+=`${(name||'').slice(0,14).padEnd(16)} ${qStr.padStart(6)} ${num(t).padStart(10)}\n`;
   });
@@ -930,9 +983,9 @@ function renderHistory(){
   const tbody=document.getElementById('histTbody');
   tbody.innerHTML='';
   let total=0,count=0;
-  const filtered=[...sales].reverse().filter(s=>{
+  const filtered=sales.filter(s=>{
     if(dateF){
-      const sd=s.timestamp?s.timestamp.slice(0,10):parseDate(s.date).toISOString().slice(0,10);
+      const sd=s.timestamp?s.timestamp.slice(0,10):new Date(s.date).toISOString().slice(0,10);
       if(!sd.includes(dateF)) return false;
     }
     if(cashierF!=='Все сотрудники'&&s.cashier!==cashierF) return false;
@@ -940,7 +993,7 @@ function renderHistory(){
   });
   filtered.forEach(s=>{
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${s.number}</td><td style="white-space:nowrap;font-size:11px">${esc(s.date)}</td><td class="col-num"><b>${num(s.total)}</b></td><td style="font-size:11px">${esc(s.cashier||'')}</td><td><button class="btn" style="padding:2px 8px;font-size:11px" onclick="showSaleDetail(${sales.indexOf(s)})">👁</button></td>`;
+    tr.innerHTML=`<td>${s.number}</td><td style="white-space:nowrap;font-size:11px">${esc(s.date)}</td><td class="col-num"><b>${num(s.total)}</b></td><td style="font-size:11px">${esc(s.cashier||'')}</td><td><button class="btn" style="padding:2px 8px;font-size:11px" onclick="showSaleDetail(${sales.findIndex(x=>x.number===s.number)})">👁</button></td>`;
     tbody.appendChild(tr);
     total+=s.total||0;count++;
   });
@@ -956,12 +1009,13 @@ function renderStock(){
   tbody.innerHTML='';
   Object.values(products).filter(p=>!q||p.name.toLowerCase().includes(q)||(p.code+'').includes(q)).forEach(p=>{
     let cls,txt;
-    if(p.quantity<=0){cls='status-out';txt='Нет';}
-    else if(p.min_stock>0&&p.quantity<p.min_stock){cls='status-low';txt='Мало';}
+    const qty = p.quantity||0;
+    if(qty<=0){cls='status-out';txt='Нет';}
+    else if((p.min_stock||0)>0&&qty<(p.min_stock||0)){cls='status-low';txt='Мало';}
     else{cls='status-ok';txt='Норма';}
     const tr=document.createElement('tr');
     if(p.code===selectedStockCode) tr.classList.add('selected');
-    tr.innerHTML=`<td>${esc(p.code)}</td><td>${esc(p.name)}</td><td class="col-num">${num(p.price)}</td><td>${esc(p.unit)}</td><td class="col-num"><b>${fmtQty(p.quantity,p.is_weighted)}</b></td><td class="${cls}">${txt}</td>`;
+    tr.innerHTML=`<td>${esc(p.code)}</td><td>${esc(p.name)}</td><td class="col-num">${num(p.price)}</td><td>${esc(p.unit||'шт')}</td><td class="col-num"><b>${fmtQty(qty,p.is_weighted)}</b></td><td class="${cls}">${txt}</td>`;
     tr.style.cursor='pointer';
     tr.onclick=()=>{selectedStockCode=p.code;document.querySelectorAll('#stockTbody tr').forEach(r=>r.classList.remove('selected'));tr.classList.add('selected');};
     tbody.appendChild(tr);
@@ -970,7 +1024,7 @@ function renderStock(){
 function addStock(){
   if(!selectedStockCode||!products[selectedStockCode]){alert('Выберите товар из списка!');return;}
   const p=products[selectedStockCode];
-  document.getElementById('addStockInfo').innerHTML=`<b>${esc(p.name)}</b><br>Остаток: ${fmtQty(p.quantity,p.is_weighted)} ${esc(p.unit)}`;
+  document.getElementById('addStockInfo').innerHTML=`<b>${esc(p.name)}</b><br>Остаток: ${fmtQty(p.quantity||0,p.is_weighted)} ${p.unit||'шт'}`;
   document.getElementById('addStockQty').value='';
   document.getElementById('addStockQty').step=p.is_weighted?'0.001':'1';
   openModal('modalAddStock');
@@ -980,12 +1034,13 @@ async function confirmAddStock(){
   const qty=parseFloat(document.getElementById('addStockQty').value);
   if(!qty||qty<=0){alert('Введите корректное количество!');return;}
   const p=products[selectedStockCode];
-  p.quantity+=qty;
+  p.quantity = (p.quantity||0) + qty;
   setSyncStatus('☁️ Сохранение...');
   await saveProduct(selectedStockCode);
-  renderStock();renderProductList();
+  renderStock();
+  renderProductList();
   closeModal('modalAddStock');
-  setStatus(`📥 Принято: ${p.name} +${fmtQty(qty,p.is_weighted)} ${p.unit}`);
+  setStatus(`📥 Принято: ${p.name} +${fmtQty(qty,p.is_weighted)} ${p.unit||'шт'}`);
 }
 
 // ========== REPORTS ==========
@@ -997,19 +1052,19 @@ function renderReports(){
   const filtered=sales.filter(s=>{
     if(cashierF!=='Все сотрудники'&&s.cashier!==cashierF) return false;
     if(dateFrom||dateTo){
-      const sd=s.timestamp?new Date(s.timestamp):parseDate(s.date);
+      const sd=s.timestamp?new Date(s.timestamp):new Date(s.date);
       if(dateFrom&&sd<new Date(dateFrom)) return false;
       if(dateTo&&sd>new Date(dateTo+' 23:59:59')) return false;
     }
     return true;
   });
-  const totalSales=filtered.reduce((s,x)=>s+x.total,0);
+  const totalSales=filtered.reduce((s,x)=>s+(x.total||0),0);
   const count=filtered.length;
   let totalProfit=0;
   const prodStats={};
   filtered.forEach(s=>{
-    s.items.forEach(item=>{
-      const[name,qty,,total,disc,purchase]=item;
+    (s.items||[]).forEach(item=>{
+      const[name,qty,total,disc,purchase]=[item[0],item[1],item[3],item[4],item[5]];
       const revenue=total*(1-disc/100);
       const cost=(purchase||0)*qty;
       totalProfit+=revenue-cost;
@@ -1031,12 +1086,13 @@ function renderReports(){
     tbody.appendChild(tr);
   });
 }
-function parseDate(str){const d=new Date(str);if(!isNaN(d))return d;const m=str.match(/(\d+)\.(\d+)\.(\d+)\s+(\d+):(\d+)/);if(m)return new Date(m[3],m[2]-1,m[1],m[4],m[5]);return new Date(0);}
 
 // ========== SETTINGS ==========
 function saveCashier(){const name=document.getElementById('settingsCashier').value.trim();if(!name)return;currentCashier=name;document.getElementById('lbl_cashier').textContent=name;setStatus(`Кассир изменён: ${name}`);alert('Сохранено!');}
-function clearAllSales(){if(!confirm('УДАЛИТЬ всю историю продаж?'))return;sales=[];renderHistory();renderReports();setStatus('История очищена');}
-function clearAllProducts(){if(!confirm('УДАЛИТЬ все товары?'))return;products={};renderProductList();renderStock();renderQuickButtons();setStatus('Товары удалены');}
+
+// ИСПРАВЛЕННЫЕ функции для удаления данных
+function clearAllSales() { deleteAllSales(); }
+function clearAllProducts() { deleteAllProducts(); }
 
 // ========== CASHIER DROPDOWNS ==========
 function updateCashierDropdowns(){
